@@ -6,7 +6,9 @@ This project analyzes airline flight data to identify delay patterns and predict
 
 📊 Dataset
 
-Source: https://www.kaggle.com/datasets/jimschacko/airlines-dataset-to-predict-a-delay/data
+Sources: 
+- https://www.kaggle.com/datasets/jimschacko/airlines-dataset-to-predict-a-delay/data
+- https://www.kaggle.com/datasets/deepankurk/flight-take-off-data-jfk-airport
 
 Size: 539,383 flight records
 
