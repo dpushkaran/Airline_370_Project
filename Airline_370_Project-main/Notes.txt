@@ -1,0 +1,6 @@
+Run the model with just weather information
+Run the model with weather and season of the year
+Create visualizations on the distribution of all the delays throughout the day.
+Run the model on delays that are greater than an hour. What are the key features in predicting delays that are greater than an hour.
+
+
