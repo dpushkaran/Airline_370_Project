@@ -1,0 +1,570 @@
+import { useState, useEffect } from 'react';
+import { Search, Info, XCircle, CheckCircle, AlertCircle, Loader } from 'lucide-react';
+
+// Mock data for the application
+const AIRLINES = [
+  { code: 'AA', name: 'American Airlines' },
+  { code: 'DL', name: 'Delta Air Lines' },
+  { code: 'UA', name: 'United Airlines' },
+  { code: 'WN', name: 'Southwest Airlines' },
+  { code: 'B6', name: 'JetBlue Airways' },
+  { code: 'AS', name: 'Alaska Airlines' },
+  { code: 'NK', name: 'Spirit Airlines' },
+  { code: 'F9', name: 'Frontier Airlines' }
+];
+
+const AIRPORTS = [
+  { code: 'ATL', name: 'Atlanta Hartsfield-Jackson' },
+  { code: 'LAX', name: 'Los Angeles International' },
+  { code: 'ORD', name: "Chicago O'Hare" },
+  { code: 'DFW', name: 'Dallas/Fort Worth' },
+  { code: 'DEN', name: 'Denver International' },
+  { code: 'JFK', name: 'New York Kennedy' },
+  { code: 'SFO', name: 'San Francisco International' },
+  { code: 'SEA', name: 'Seattle-Tacoma' },
+  { code: 'LAS', name: 'Las Vegas McCarran' },
+  { code: 'MCO', name: 'Orlando International' },
+  { code: 'BOS', name: 'Boston Logan' },
+  { code: 'MIA', name: 'Miami International' }
+];
+
+// Mock SHAP features data
+const MOCK_FEATURES = [
+  { name: 'Historical delay rate (7-day)', value: 0.35, impact: 0.12 },
+  { name: 'Weather conditions (precipitation)', value: '2.3 mm', impact: 0.08 },
+  { name: 'Time of day (peak hours)', value: 'Yes', impact: 0.07 },
+  { name: 'Gate occupancy', value: '87%', impact: 0.05 },
+  { name: 'Carrier route performance', value: 'Below avg', impact: 0.04 }
+];
+
+// Mock API response function
+const mockPredictDelay = (data) => {
+  return new Promise((resolve) => {
+    // Simulate network latency
+    setTimeout(() => {
+      // Generate a semi-random but sensible prediction based on input
+      const hour = new Date(data.scheduled_departure_utc).getHours();
+      const isPeakHour = hour >= 7 && hour <= 9 || hour >= 16 && hour <= 19;
+      const baseProb = isPeakHour ? 0.4 : 0.2;
+      
+      // Add carrier factor
+      const carrierFactor = {
+        'AA': 0.05,
+        'DL': -0.03,
+        'UA': 0.02,
+        'WN': -0.05,
+        'B6': 0.07,
+        'AS': -0.02,
+        'NK': 0.10,
+        'F9': 0.08
+      }[data.carrier] || 0;
+      
+      // Add route complexity factor
+      const routeFactor = (data.origin === 'JFK' || data.origin === 'LAX' || data.origin === 'ORD') ? 0.1 : 0;
+      
+      // Calculate final probability with some randomness
+      let probability = baseProb + carrierFactor + routeFactor + (Math.random() * 0.1 - 0.05);
+      probability = Math.max(0.05, Math.min(0.95, probability)); // Keep between 5-95%
+      
+      resolve({
+        delay_probability: probability.toFixed(2),
+        model_version: "2025-w18-xgb-1.3.0",
+        latency_ms: Math.floor(Math.random() * 15) + 3
+      });
+    }, Math.random() < 0.1 ? 600 : 200); // Occasionally slow response to test UX
+  });
+};
+
+export default function FlightDelayPredictor() {
+  // Form state
+  const [origin, setOrigin] = useState('');
+  const [destination, setDestination] = useState('');
+  const [airline, setAirline] = useState('');
+  const [flightNumber, setFlightNumber] = useState('');
+  const [departureDate, setDepartureDate] = useState('');
+  const [departureTime, setDepartureTime] = useState('');
+  
+  // UI state
+  const [isLoading, setIsLoading] = useState(false);
+  const [prediction, setPrediction] = useState(null);
+  const [showExplanation, setShowExplanation] = useState(false);
+  const [formErrors, setFormErrors] = useState({});
+  const [airportDropdown, setAirportDropdown] = useState({ field: null, show: false });
+  const [airlineDropdown, setAirlineDropdown] = useState(false);
+  
+  // Set default date to tomorrow
+  useEffect(() => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    setDepartureDate(tomorrow.toISOString().split('T')[0]);
+    setDepartureTime('12:00');
+  }, []);
+  
+  // Handle form submission
+  const handleSubmit = async (e) => {
+    if (e) e.preventDefault();
+    
+    // Form validation
+    const errors = {};
+    if (!origin) errors.origin = 'Origin airport is required';
+    if (!destination) errors.destination = 'Destination airport is required';
+    if (origin === destination) errors.destination = 'Destination must be different from origin';
+    if (!airline) errors.airline = 'Airline is required';
+    if (!flightNumber) errors.flightNumber = 'Flight number is required';
+    if (!departureDate) errors.departureDate = 'Departure date is required';
+    if (!departureTime) errors.departureTime = 'Departure time is required';
+    
+    // Check if date is in the past
+    const departureDateTime = new Date(`${departureDate}T${departureTime}`);
+    if (departureDateTime < new Date()) {
+      errors.departureDate = 'Departure date/time cannot be in the past';
+    }
+    
+    setFormErrors(errors);
+    
+    // If there are errors, don't submit
+    if (Object.keys(errors).length > 0) {
+      return;
+    }
+    
+    setIsLoading(true);
+    setPrediction(null);
+    setShowExplanation(false);
+    
+    try {
+      // Format the date and time for API
+      const dateTimeUTC = new Date(`${departureDate}T${departureTime}`).toISOString();
+      
+      // Call the API
+      const result = await mockPredictDelay({
+        scheduled_departure_utc: dateTimeUTC,
+        carrier: airline,
+        flight_number: flightNumber,
+        origin: origin,
+        destination: destination
+      });
+      
+      setPrediction(result);
+    } catch (error) {
+      console.error('Prediction failed:', error);
+      // In real app, we'd handle this more gracefully
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  // Get prediction color based on probability
+  const getPredictionColor = (probability) => {
+    const prob = parseFloat(probability);
+    if (prob <= 0.3) return 'text-green-600';
+    if (prob <= 0.6) return 'text-amber-500';
+    return 'text-red-600';
+  };
+  
+  // Get prediction ring color
+  const getPredictionRingColor = (probability) => {
+    const prob = parseFloat(probability);
+    if (prob <= 0.3) return 'stroke-green-500';
+    if (prob <= 0.6) return 'stroke-amber-400';
+    return 'stroke-red-500';
+  };
+  
+  // Handle dropdown selection
+  const handleAirportSelect = (field, code) => {
+    if (field === 'origin') {
+      setOrigin(code);
+    } else {
+      setDestination(code);
+    }
+    setAirportDropdown({ field: null, show: false });
+  };
+  
+  const handleAirlineSelect = (code) => {
+    setAirline(code);
+    setAirlineDropdown(false);
+  };
+  
+  // Filter airports based on search
+  const filterAirports = (search, field) => {
+    const searchTerm = (field === 'origin' ? origin : destination).toLowerCase();
+    return AIRPORTS.filter(airport => 
+      airport.code.toLowerCase().includes(searchTerm) || 
+      airport.name.toLowerCase().includes(searchTerm)
+    ).slice(0, 6); // Limit to 6 results for better UX
+  };
+  
+  // Filter airlines based on search
+  const filterAirlines = () => {
+    const searchTerm = airline.toLowerCase();
+    return AIRLINES.filter(a => 
+      a.code.toLowerCase().includes(searchTerm) || 
+      a.name.toLowerCase().includes(searchTerm)
+    ).slice(0, 6);
+  };
+  
+  return (
+    <div className="flex flex-col min-h-screen bg-gray-50 dark:bg-gray-900">
+      <header className="bg-blue-600 text-white p-4 shadow-md">
+        <div className="container mx-auto">
+          <h1 className="text-2xl font-bold">Flight Delay Predictor</h1>
+          <p className="text-blue-100">Powered by machine learning</p>
+        </div>
+      </header>
+      
+      <main className="container mx-auto flex-grow p-4 md:p-6">
+        <div className="max-w-4xl mx-auto bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Origin Airport */}
+              <div className="relative">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Origin Airport
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={origin}
+                    onChange={(e) => setOrigin(e.target.value)}
+                    onFocus={() => setAirportDropdown({ field: 'origin', show: true })}
+                    placeholder="Search airport code or name"
+                    className={`w-full p-2 border rounded-md focus:ring-2 focus:ring-blue-500 
+                      dark:bg-gray-700 dark:border-gray-600 dark:text-white
+                      ${formErrors.origin ? 'border-red-500' : 'border-gray-300'}`}
+                  />
+                  <Search className="absolute right-3 top-2.5 text-gray-400" size={18} />
+                </div>
+                {formErrors.origin && (
+                  <p className="mt-1 text-sm text-red-500">{formErrors.origin}</p>
+                )}
+                
+                {/* Origin Airport Dropdown */}
+                {airportDropdown.show && airportDropdown.field === 'origin' && (
+                  <div className="absolute z-10 mt-1 w-full bg-white dark:bg-gray-700 shadow-lg rounded-md border border-gray-200 dark:border-gray-600 max-h-60 overflow-auto">
+                    {filterAirports(origin, 'origin').map(airport => (
+                      <div 
+                        key={airport.code}
+                        className="p-2 hover:bg-blue-50 dark:hover:bg-gray-600 cursor-pointer flex items-center"
+                        onClick={() => handleAirportSelect('origin', airport.code)}
+                      >
+                        <span className="font-medium">{airport.code}</span>
+                        <span className="ml-2 text-sm text-gray-600 dark:text-gray-300">{airport.name}</span>
+                      </div>
+                    ))}
+                    {filterAirports(origin, 'origin').length === 0 && (
+                      <div className="p-2 text-gray-500 dark:text-gray-400">No airports found</div>
+                    )}
+                  </div>
+                )}
+              </div>
+              
+              {/* Destination Airport */}
+              <div className="relative">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Destination Airport
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={destination}
+                    onChange={(e) => setDestination(e.target.value)}
+                    onFocus={() => setAirportDropdown({ field: 'destination', show: true })}
+                    placeholder="Search airport code or name"
+                    className={`w-full p-2 border rounded-md focus:ring-2 focus:ring-blue-500 
+                      dark:bg-gray-700 dark:border-gray-600 dark:text-white
+                      ${formErrors.destination ? 'border-red-500' : 'border-gray-300'}`}
+                  />
+                  <Search className="absolute right-3 top-2.5 text-gray-400" size={18} />
+                </div>
+                {formErrors.destination && (
+                  <p className="mt-1 text-sm text-red-500">{formErrors.destination}</p>
+                )}
+                
+                {/* Destination Airport Dropdown */}
+                {airportDropdown.show && airportDropdown.field === 'destination' && (
+                  <div className="absolute z-10 mt-1 w-full bg-white dark:bg-gray-700 shadow-lg rounded-md border border-gray-200 dark:border-gray-600 max-h-60 overflow-auto">
+                    {filterAirports(destination, 'destination').map(airport => (
+                      <div 
+                        key={airport.code}
+                        className="p-2 hover:bg-blue-50 dark:hover:bg-gray-600 cursor-pointer flex items-center"
+                        onClick={() => handleAirportSelect('destination', airport.code)}
+                      >
+                        <span className="font-medium">{airport.code}</span>
+                        <span className="ml-2 text-sm text-gray-600 dark:text-gray-300">{airport.name}</span>
+                      </div>
+                    ))}
+                    {filterAirports(destination, 'destination').length === 0 && (
+                      <div className="p-2 text-gray-500 dark:text-gray-400">No airports found</div>
+                    )}
+                  </div>
+                )}
+              </div>
+              
+              {/* Airline */}
+              <div className="relative">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Airline
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={airline}
+                    onChange={(e) => setAirline(e.target.value)}
+                    onFocus={() => setAirlineDropdown(true)}
+                    placeholder="Airline code or name"
+                    className={`w-full p-2 border rounded-md focus:ring-2 focus:ring-blue-500 
+                      dark:bg-gray-700 dark:border-gray-600 dark:text-white
+                      ${formErrors.airline ? 'border-red-500' : 'border-gray-300'}`}
+                  />
+                  <Search className="absolute right-3 top-2.5 text-gray-400" size={18} />
+                </div>
+                {formErrors.airline && (
+                  <p className="mt-1 text-sm text-red-500">{formErrors.airline}</p>
+                )}
+                
+                {/* Airline Dropdown */}
+                {airlineDropdown && (
+                  <div className="absolute z-10 mt-1 w-full bg-white dark:bg-gray-700 shadow-lg rounded-md border border-gray-200 dark:border-gray-600 max-h-60 overflow-auto">
+                    {filterAirlines().map(airline => (
+                      <div 
+                        key={airline.code}
+                        className="p-2 hover:bg-blue-50 dark:hover:bg-gray-600 cursor-pointer flex items-center"
+                        onClick={() => handleAirlineSelect(airline.code)}
+                      >
+                        <span className="font-medium">{airline.code}</span>
+                        <span className="ml-2 text-sm text-gray-600 dark:text-gray-300">{airline.name}</span>
+                      </div>
+                    ))}
+                    {filterAirlines().length === 0 && (
+                      <div className="p-2 text-gray-500 dark:text-gray-400">No airlines found</div>
+                    )}
+                  </div>
+                )}
+              </div>
+              
+              {/* Flight Number */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Flight Number
+                </label>
+                <input
+                  type="text"
+                  value={flightNumber}
+                  onChange={(e) => setFlightNumber(e.target.value.replace(/\D/g, '').substring(0, 4))}
+                  placeholder="e.g., 1234"
+                  className={`w-full p-2 border rounded-md focus:ring-2 focus:ring-blue-500 
+                    dark:bg-gray-700 dark:border-gray-600 dark:text-white
+                    ${formErrors.flightNumber ? 'border-red-500' : 'border-gray-300'}`}
+                />
+                {formErrors.flightNumber && (
+                  <p className="mt-1 text-sm text-red-500">{formErrors.flightNumber}</p>
+                )}
+              </div>
+              
+              {/* Departure Date */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Departure Date
+                </label>
+                <input
+                  type="date"
+                  value={departureDate}
+                  onChange={(e) => setDepartureDate(e.target.value)}
+                  className={`w-full p-2 border rounded-md focus:ring-2 focus:ring-blue-500 
+                    dark:bg-gray-700 dark:border-gray-600 dark:text-white
+                    ${formErrors.departureDate ? 'border-red-500' : 'border-gray-300'}`}
+                />
+                {formErrors.departureDate && (
+                  <p className="mt-1 text-sm text-red-500">{formErrors.departureDate}</p>
+                )}
+              </div>
+              
+              {/* Departure Time */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Departure Time
+                </label>
+                <input
+                  type="time"
+                  value={departureTime}
+                  onChange={(e) => setDepartureTime(e.target.value)}
+                  className={`w-full p-2 border rounded-md focus:ring-2 focus:ring-blue-500 
+                    dark:bg-gray-700 dark:border-gray-600 dark:text-white
+                    ${formErrors.departureTime ? 'border-red-500' : 'border-gray-300'}`}
+                />
+                {formErrors.departureTime && (
+                  <p className="mt-1 text-sm text-red-500">{formErrors.departureTime}</p>
+                )}
+              </div>
+            </div>
+            
+            {/* Submit Button */}
+            <div className="flex justify-center">
+              <button
+                onClick={handleSubmit}
+                disabled={isLoading}
+                className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-6 rounded-md 
+                  shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2
+                  disabled:bg-blue-300 disabled:cursor-not-allowed transition-colors
+                  dark:focus:ring-offset-gray-800"
+              >
+                {isLoading ? (
+                  <span className="inline-flex items-center">
+                    <Loader className="animate-spin mr-2" size={18} />
+                    Predicting...
+                  </span>
+                ) : "Predict Delay"}
+              </button>
+            </div>
+          </div>
+          
+          {/* Results Section */}
+          {(prediction || isLoading) && (
+            <div className="mt-8 border-t pt-6 dark:border-gray-700">
+              <h2 className="text-xl font-semibold text-gray-800 dark:text-gray-200 mb-4">Prediction Results</h2>
+              
+              {isLoading ? (
+                <div className="flex flex-col items-center justify-center py-8">
+                  <Loader className="text-blue-500 animate-spin mb-4" size={48} />
+                  <p className="text-gray-600 dark:text-gray-300">Analyzing flight data...</p>
+                </div>
+              ) : prediction && (
+                <div className="flex flex-col md:flex-row items-center md:items-start gap-8">
+                  {/* Circular Progress */}
+                  <div className="relative w-48 h-48 flex items-center justify-center">
+                    <svg className="w-full h-full" viewBox="0 0 100 100">
+                      {/* Background circle */}
+                      <circle
+                        cx="50"
+                        cy="50"
+                        r="45"
+                        fill="none"
+                        stroke="#e5e7eb"
+                        strokeWidth="8"
+                        className="dark:stroke-gray-700"
+                      />
+                      {/* Progress circle */}
+                      <circle
+                        cx="50"
+                        cy="50"
+                        r="45"
+                        fill="none"
+                        stroke="#e5e7eb"
+                        strokeWidth="8"
+                        strokeDasharray="283"
+                        strokeDashoffset={283 - (283 * parseFloat(prediction.delay_probability))}
+                        className={getPredictionRingColor(prediction.delay_probability)}
+                        transform="rotate(-90 50 50)"
+                      />
+                      {/* Text in the middle */}
+                      <text
+                        x="50"
+                        y="45"
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                        className={`text-3xl font-bold ${getPredictionColor(prediction.delay_probability)}`}
+                      >
+                        {Math.round(parseFloat(prediction.delay_probability) * 100)}%
+                      </text>
+                      <text
+                        x="50"
+                        y="65"
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                        className="text-sm fill-gray-500 dark:fill-gray-400"
+                      >
+                        Delay Risk
+                      </text>
+                    </svg>
+                  </div>
+                  
+                  {/* Prediction Details */}
+                  <div className="flex-1 text-center md:text-left">
+                    <h3 className="text-lg font-medium text-gray-800 dark:text-gray-200 mb-2">
+                      {parseFloat(prediction.delay_probability) <= 0.3 ? (
+                        <span className="flex items-center justify-center md:justify-start">
+                          <CheckCircle className="text-green-500 mr-2" size={20} />
+                          Low delay risk
+                        </span>
+                      ) : parseFloat(prediction.delay_probability) <= 0.6 ? (
+                        <span className="flex items-center justify-center md:justify-start">
+                          <AlertCircle className="text-amber-500 mr-2" size={20} />
+                          Moderate delay risk
+                        </span>
+                      ) : (
+                        <span className="flex items-center justify-center md:justify-start">
+                          <XCircle className="text-red-500 mr-2" size={20} />
+                          High delay risk
+                        </span>
+                      )}
+                    </h3>
+                    
+                    <p className="text-gray-600 dark:text-gray-300 mb-4">
+                      {Math.round(parseFloat(prediction.delay_probability) * 100)}% chance your flight will be delayed by 15 minutes or more.
+                    </p>
+                    
+                    <div className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                      <p>Model version: {prediction.model_version}</p>
+                      <p>Response time: {prediction.latency_ms} ms</p>
+                    </div>
+                    
+                    <button
+                      onClick={() => setShowExplanation(!showExplanation)}
+                      className="inline-flex items-center text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+                    >
+                      <Info size={16} className="mr-1" />
+                      {showExplanation ? "Hide factors" : "What drives this prediction?"}
+                    </button>
+                  </div>
+                </div>
+              )}
+              
+              {/* Explanation Section (SHAP Values) */}
+              {prediction && showExplanation && (
+                <div className="mt-6 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                  <h3 className="text-lg font-medium text-gray-800 dark:text-gray-200 mb-3">Top contributing factors</h3>
+                  
+                  <div className="space-y-3">
+                    {MOCK_FEATURES.map((feature, index) => (
+                      <div key={index} className="flex flex-col md:flex-row md:items-center">
+                        <div className="w-full md:w-1/3 font-medium text-gray-700 dark:text-gray-300">
+                          {feature.name}:
+                        </div>
+                        <div className="w-full md:w-1/3 text-gray-600 dark:text-gray-400">
+                          {feature.value}
+                        </div>
+                        <div className="w-full md:w-1/3">
+                          <div className="flex items-center">
+                            <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
+                              <div 
+                                className="bg-blue-600 h-2.5 rounded-full" 
+                                style={{ width: `${Math.round(feature.impact * 100 * 3)}%` }}
+                              ></div>
+                            </div>
+                            <span className="ml-2 text-sm text-gray-600 dark:text-gray-400">
+                              {Math.round(feature.impact * 100)}%
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  
+                  <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">
+                    These factors represent the most significant variables in our machine learning model's prediction.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </main>
+      
+      <footer className="bg-gray-100 dark:bg-gray-800 py-4 border-t border-gray-200 dark:border-gray-700 mt-auto">
+        <div className="container mx-auto text-center text-gray-600 dark:text-gray-400 text-sm">
+          <p>Flight Delay Predictor | Powered by XGBoost Machine Learning</p>
+          <p className="mt-1">Using real-time weather, historical, and operational data for accurate predictions</p>
+        </div>
+      </footer>
+    </div>
+  );
+}
